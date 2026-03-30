@@ -48,60 +48,73 @@ export default function ShoppingCart() {
   const notifTimerRef = useRef(null);
 
   // --- Notification ---------------------------------------------------
-  //fix notification settimeout
-  const showNotification = useCallback((msg) => {
-    if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
-    setNotification(msg);
+  const showNotification = (msg) => {
+    // BUG 1: Missing clearTimeout before setting a new timer.
+    // Rapid successive calls stack timers; the first one fires and wipes
+    // a notification that belongs to the second call.
+    // FIX: Clear any existing timer before scheduling a new one so only
+    // the latest notification's timer is active at any given time.
+    clearTimeout(notifTimerRef.current);
     notifTimerRef.current = setTimeout(() => setNotification(null), 2500);
+    setNotification(msg);
+  };
+
+  useEffect(() => {
+    return () => clearTimeout(notifTimerRef.current);
   }, []);
 
   // --- Add to cart ----------------------------------------------------
-  //fix add cart
   const addToCart = (product) => {
+    if (product.stock === 0) return;
+
     setCart((prev) => {
       const existing = prev.find((i) => i.id === product.id);
       if (existing) {
-        if (existing.qty >= product.stock) {
-          showNotification("Max stock reached!");
-          return prev;
-        }
-        return prev.map(item => 
-          item.id === product.id ? { ...item, qty: item.qty + 1 } : item
-        );
+        // BUG 2: Direct mutation of an object that lives inside React state.
+        // React state must be treated as immutable. Mutating then spreading
+        // fools React's shallow-equal bail-out — memoised children won't re-render.
+        // FIX: Use map() to return a new array with a new item object instead
+        // of mutating the existing reference.
+        return prev.map((i) => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
       }
       return [...prev, { ...product, qty: 1 }];
     });
+
     showNotification(`${product.name} added!`);
   };
+
   // --- Update quantity -------------------------------------------------
- const updateQty = (id, qty) => {
-    if (qty <= 0) {
-      removeFromCart(id);
-      return;
-    }
- //update quantity bug fix 
-    const productInfo = PRODUCTS.find(p => p.id === id);
-    if (qty > productInfo.stock) {
-      showNotification(`Only ${productInfo.stock} available`);
-      return;
-    }
+  const updateQty = (id, qty) => {
+    if (qty < 1) { removeFromCart(id); return; }
 
     setCart((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, qty } : item))
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        // BUG 3: Checks qty > item.qty (current cart amount) instead of
+        // qty > item.stock. You can set qty to 999 without triggering the warning.
+        // FIX: Compare the requested qty against item.stock (the actual inventory
+        // limit) so the guard fires correctly.
+        if (qty > item.stock) {
+          showNotification("Not enough stock!");
+          return item;
+        }
+        return { ...item, qty };
+      })
     );
   };
 
-  const removeFromCart = (id) => setCart((prev) => prev.filter((i) => i.id !== id));
+  const removeFromCart = (id) =>
+    setCart((prev) => prev.filter((i) => i.id !== id));
 
-  // BUG 4 FIX: Case sensitive promo codes
+  // --- Promo codes ----------------------------------------------------
   const applyPromo = () => {
-    const code = promoInput.trim().toUpperCase();
-    const discountPct = PROMO_CODES[code];
-    
-    if (discountPct !== undefined) {
-      setAppliedPromo({ code, pct: discountPct });
-      showNotification(`${discountPct}% discount applied!`);
-      setPromoInput("");
+    // BUG 4: Case-sensitive lookup. "save10" or "Save10" silently fail.
+    // FIX: Normalise the input to uppercase before the lookup so codes
+    // are accepted regardless of the capitalisation the user types.
+    const pct = PROMO_CODES[promoCode.toUpperCase()];
+    if (pct !== undefined) {
+      setAppliedPromo({ code: promoCode, pct });
+      showNotification(`${pct}% discount applied!`);
     } else {
       showNotification("Invalid promo code");
     }
@@ -113,7 +126,9 @@ export default function ShoppingCart() {
     // BUG 5: discount is a percentage number (e.g. 10) but is subtracted
     // as if it were a dollar amount. $129.99 cart with SAVE10 becomes $119.99
     // instead of $116.99.
-    const discount  = appliedPromo ? appliedPromo.pct : 0;
+    // FIX: Convert the percentage to a fractional dollar amount by multiplying
+    // subtotal by (pct / 100) before subtracting.
+    const discount  = appliedPromo ? subtotal * (appliedPromo.pct / 100) : 0;
     const afterDisc = subtotal - discount;
     const shipping  = afterDisc >= SHIPPING_THRESHOLD ? 0 : SHIPPING_COST;
     const tax       = afterDisc * TAX_RATE;
@@ -123,17 +138,21 @@ export default function ShoppingCart() {
   // --- Save / restore cart --------------------------------------------
   // BUG 6 (stale closure): useCallback with [] deps captures `cart` at
   // mount time (empty []). Every saved snapshot will contain 0 items.
+  // FIX: Add `cart` to the dependency array so the callback always closes
+  // over the current cart value when it is called.
   const saveCartSnapshot = useCallback(() => {
     if (cart.length === 0) return;
     setSavedCarts((prev) => [...prev, { id: Date.now(), items: [...cart] }]);
     showNotification("Cart saved!");
-  }, []);
+  }, [cart]);
 
   const restoreCart = (snapshot) => {
     // BUG 7: Restores by reference — the saved snapshot shares object
     // references with the live cart. Mutating cart items later (BUG 2
     // style) will corrupt the saved snapshot too.
-    setCart(snapshot.items);
+    // FIX: Shallow-copy each item so the live cart and the snapshot hold
+    // independent objects that cannot alias each other.
+    setCart(snapshot.items.map((i) => ({ ...i })));
     showNotification("Cart restored!");
   };
 
@@ -142,6 +161,9 @@ export default function ShoppingCart() {
     if (cart.length === 0) return;
     // BUG 8: No guard against double-submit. Clicking twice while
     // orderStatus === "placing" triggers two timeouts and two state resets.
+    // FIX: Return early if an order is already in flight so subsequent
+    // clicks are ignored until the first one completes.
+    if (orderStatus === "placing") return;
     setOrderStatus("placing");
     setTimeout(() => {
       setCart([]);
@@ -156,7 +178,9 @@ export default function ShoppingCart() {
       // BUG 9 (stale closure in interval): `cart` is captured at effect
       // creation time and is always []. The filter never runs against the
       // live cart. Fix: use the functional updater setCart(prev => ...).
-      setCart(cart.filter((i) => i.stock > 0));
+      // FIX: Pass a function to setCart so it always receives the current
+      // cart state rather than the stale closure value.
+      setCart((prev) => prev.filter((i) => i.stock > 0));
     }, 5000);
     return () => clearInterval(id);
   }, []);
@@ -169,8 +193,10 @@ export default function ShoppingCart() {
       <div style={styles.centered}>
         <h2>✅ Order placed!</h2>
         {/* BUG 10: Calls placeOrder() instead of resetting to "idle".
-            Clicking "Continue Shopping" triggers another order flow. */}
-        <button style={styles.btn} onClick={placeOrder}>
+            Clicking "Continue Shopping" triggers another order flow.
+            FIX: Reset orderStatus back to "idle" so the main cart UI
+            is shown again without triggering another order submission. */}
+        <button style={styles.btn} onClick={() => setOrderStatus("idle")}>
           Continue Shopping
         </button>
       </div>
@@ -255,7 +281,9 @@ export default function ShoppingCart() {
               ].map(([label, val]) => (
                 // BUG 11: Missing `key` prop on list items. React will log a
                 // warning and may reuse wrong DOM nodes when the list changes.
-                <div style={styles.totalRow}>
+                // FIX: Add key={label} — labels are unique strings in this list
+                // so they make a stable, meaningful key.
+                <div key={label} style={styles.totalRow}>
                   <span>{label}</span><span>{val}</span>
                 </div>
               ))}
