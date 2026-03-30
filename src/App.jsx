@@ -52,8 +52,8 @@ export default function ShoppingCart() {
     // BUG 1: Missing clearTimeout before setting a new timer.
     // Rapid successive calls stack timers; the first one fires and wipes
     // a notification that belongs to the second call.
-    // FIX: Clear any existing timer before scheduling a new one so only
-    // the latest notification's timer is active at any given time.
+    // FIX: Here I added cleartimeout before exsisting notification
+   
     clearTimeout(notifTimerRef.current);
     notifTimerRef.current = setTimeout(() => setNotification(null), 2500);
     setNotification(msg);
@@ -73,9 +73,12 @@ export default function ShoppingCart() {
         // BUG 2: Direct mutation of an object that lives inside React state.
         // React state must be treated as immutable. Mutating then spreading
         // fools React's shallow-equal bail-out — memoised children won't re-render.
-        // FIX: Use map() to return a new array with a new item object instead
-        // of mutating the existing reference.
-        return prev.map((i) => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+        // FIX: Use map() to return a new array with a new item object instead of mutating exsisting item
+       
+        return prev.map((i) => {
+          if (i.id !== product.id) return i;
+          return { ...i, qty: i.qty + 1 };
+        });
       }
       return [...prev, { ...product, qty: 1 }];
     });
